@@ -1,0 +1,33 @@
+<!DOCTYPE HTML>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+        <title>Probando GithubActions</title>
+        <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+        <meta name="viewport" content="width=device-width,initial-scale=1" />
+        <link rel="stylesheet" href="/css/style.css" />
+</head>
+<body th:style="'background: ' + ${bg}">
+    <div class="app">
+        <div class="card">
+            <h1 th:text="'¡Hola ' + ${nombre} + '!'">¡Hola Mundo!</h1>
+            <p class="hint">Pasa <strong>?nombre=TuNombre</strong> en la URL para cambiar el saludo.</p>
+            <p class="hint">El fondo se configura desde <code>application.properties</code> con la clave <code>app.bg</code>.</p>
+
+            <div class="hint" style="text-align:left; margin-top:10px;">
+                <strong>Cómo funciona `app.bg`</strong>
+                <p>Es el valor CSS que se aplicará a <code>background</code> del <code>body</code>. Puede ser cualquier valor válido de CSS, por ejemplo gradientes:
+                </p>
+                <ul>
+                    <li><code>linear-gradient(135deg,#eef2ff 0%,#fef3c7 100%)</code> — degradado lineal.</li>
+                    <li><code>radial-gradient(circle at 30% 30%, #c1ffd7 0%, #f0fff4 60%)</code> — degradado radial.</li>
+                    <li><code>#ffffff</code> — color sólido también válido.</li>
+                </ul>
+                <p>Ejemplo en <code>application.properties</code>:
+                </p>
+                <pre style="background:#f7f7f8;padding:8px;border-radius:6px;">app.bg=linear-gradient(135deg,#f0f9ff 0%, #fff1f2 100%)</pre>
+                <p>Después de cambiarlo, reinicia la aplicación para que se aplique el nuevo fondo.</p>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
