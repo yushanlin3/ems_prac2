@@ -1,13 +1,188 @@
-name: Build and test of Java Project
-on: [push]
+name: CD - Build Docker, Push to ACR, Deploy to Azure Container Apps
+
+on:
+  push:
+    branches: ["main"]
+    tags:
+      - "v*"
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  LOCATION: ${{ vars.AZURE_LOCATION }}
+  SUFFIX: ${{ vars.SUFFIX }}
+
 jobs:
- build:
-   runs-on: ubuntu-latest 
-   steps:
-    - uses: actions/checkout@v2
-    - name: Set up JDK 1.8
-      uses: actions/setup-java@v1
-      with:
-        java-version: 1.8
-    - name: Build with Maven
-      run: mvn -B package --file pom.xml
+  build_test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 8
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "8"
+
+      - name: Build & test with Maven
+        run: mvn -B test
+
+  deploy_staging:
+    if: github.ref == 'refs/heads/main'
+    needs: build_test
+    runs-on: ubuntu-latest
+    environment: staging
+
+    env:
+      ARM_USE_OIDC: true
+      ARM_USE_AZUREAD: true
+      ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.6
+
+      - name: Login to Azure (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Compute image tag
+        run: echo "IMAGE_TAG=${GITHUB_SHA::7}" >> $GITHUB_ENV
+
+      - name: Terraform init (staging backend)
+        working-directory: iac
+        run: |
+          terraform init \
+            -backend-config="use_azuread_auth=true" \
+            -backend-config="resource_group_name=${{ vars.TFSTATE_RESOURCE_GROUP }}" \
+            -backend-config="storage_account_name=${{ vars.TFSTATE_STORAGE_ACCOUNT }}" \
+            -backend-config="container_name=${{ vars.TFSTATE_CONTAINER }}" \
+            -backend-config="key=${{ vars.TFSTATE_KEY_STAGING }}"
+
+      - name: Terraform apply (staging) - infra bootstrap (public image)
+        working-directory: iac
+        run: |
+          terraform apply -auto-approve \
+            -var="location=${{ env.LOCATION }}" \
+            -var="suffix=${{ env.SUFFIX }}" \
+            -var="environment=staging" \
+            -var="image_tag=bootstrap"
+
+      - name: ACR login server (terraform output)
+        working-directory: iac
+        run: echo "ACR_LOGIN_SERVER=$(terraform output -raw acr_login_server)" >> $GITHUB_ENV
+
+      - name: Docker login to ACR
+        run: |
+          az acr login --name "${ACR_LOGIN_SERVER%%.*}"
+
+      - name: Build & push Docker image to ACR
+        run: |
+          docker build -t "${ACR_LOGIN_SERVER}/hola:${IMAGE_TAG}" .
+          docker push "${ACR_LOGIN_SERVER}/hola:${IMAGE_TAG}"
+
+      - name: Terraform apply (staging) - switch app to pushed image
+        working-directory: iac
+        run: |
+          terraform apply -auto-approve \
+            -var="location=${{ env.LOCATION }}" \
+            -var="suffix=${{ env.SUFFIX }}" \
+            -var="environment=staging" \
+            -var="image_tag=${{ env.IMAGE_TAG }}"
+
+      - name: Smoke test (staging)
+        working-directory: iac
+        run: |
+          APP_URL=$(terraform output -raw app_url)
+          echo "Testing $APP_URL"
+          curl -fsS "$APP_URL" | head -n 20
+
+  deploy_production:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build_test
+    runs-on: ubuntu-latest
+    environment: production
+
+    env:
+      ARM_USE_OIDC: true
+      ARM_USE_AZUREAD: true
+      ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.6
+
+      - name: Login to Azure (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Compute image tag (use git tag name)
+        run: echo "IMAGE_TAG=${GITHUB_REF_NAME}" >> $GITHUB_ENV
+
+      - name: Terraform init (production backend)
+        working-directory: iac
+        run: |
+          terraform init \
+            -backend-config="use_azuread_auth=true" \
+            -backend-config="resource_group_name=${{ vars.TFSTATE_RESOURCE_GROUP }}" \
+            -backend-config="storage_account_name=${{ vars.TFSTATE_STORAGE_ACCOUNT }}" \
+            -backend-config="container_name=${{ vars.TFSTATE_CONTAINER }}" \
+            -backend-config="key=${{ vars.TFSTATE_KEY_PRODUCTION }}"
+
+      - name: Terraform apply (production) - infra bootstrap (public image)
+        working-directory: iac
+        run: |
+          terraform apply -auto-approve \
+            -var="location=${{ env.LOCATION }}" \
+            -var="suffix=${{ env.SUFFIX }}" \
+            -var="environment=production" \
+            -var="image_tag=bootstrap"
+
+      - name: ACR login server (terraform output)
+        working-directory: iac
+        run: echo "ACR_LOGIN_SERVER=$(terraform output -raw acr_login_server)" >> $GITHUB_ENV
+
+      - name: Docker login to ACR
+        run: |
+          az acr login --name "${ACR_LOGIN_SERVER%%.*}"
+
+      - name: Build & push Docker image to ACR (prod tag)
+        run: |
+          docker build -t "${ACR_LOGIN_SERVER}/hola:${IMAGE_TAG}" .
+          docker push "${ACR_LOGIN_SERVER}/hola:${IMAGE_TAG}"
+
+      - name: Terraform apply (production) - switch app to pushed image
+        working-directory: iac
+        run: |
+          terraform apply -auto-approve \
+            -var="location=${{ env.LOCATION }}" \
+            -var="suffix=${{ env.SUFFIX }}" \
+            -var="environment=production" \
+            -var="image_tag=${{ env.IMAGE_TAG }}"
+
+      - name: Smoke test (production)
+        working-directory: iac
+        run: |
+          APP_URL=$(terraform output -raw app_url)
+          echo "Testing $APP_URL"
+          curl -fsS "$APP_URL" | head -n 20
